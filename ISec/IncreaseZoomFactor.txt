@@ -1,0 +1,7 @@
+function increaseMaxZoomFactor() {
+	var element = document.createElement('meta');
+	element.name = "viewport";
+	element.content = "maximum-scale=10";
+	var head = document.getElementsByTagName('head')[0];
+	head.appendChild(element);
+}

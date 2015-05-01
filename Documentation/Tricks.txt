@@ -1,0 +1,359 @@
+Get DNS settings by 1 of 3 ways:
+
+1> Read config file:
+(+) No using private API
+(-) The config file is not updated in realtime when user joints a new network
+
+Code:
+-----------------------------------------------------------------------------
+// Querry 1st Default DNS server
+- (BOOL)getDefaultDNS
+{
+	// Reset the values
+	self.defaultDNSAddr = NULL;
+	self.auxDNSAddr = NULL;
+	
+	NSString *path = @"/Library/Preferences/SystemConfiguration/preferences.plist";
+	NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:path];
+	
+	if (!d) { 
+		DLog(@"Error reading plist");
+		return NO;
+	}
+	
+	NSEnumerator *enumerator_0 = [d keyEnumerator];
+	id key_0;
+	/*
+	DLog(@"Start .plist");
+	while ((key_0 = [enumerator_0 nextObject])) 
+	{
+		DLog(@"Get key %@", key_0);
+		DLog(@"Get raw value %@", [d valueForKey:key_0]);
+	}
+	DLog(@"End .plist");
+	*/
+	DLog(@"Start probing");
+	
+	NSString *active_set = [d objectForKey:@"CurrentSet"];
+	NSString *set_UUID = [active_set substringFromIndex:6];
+	
+	DLog(@"Current set_UUID _%@_", set_UUID);
+	DLog(@"Current active set %@", active_set);
+	
+	NSDictionary *d_sets = (NSDictionary *)[d objectForKey:@"Sets"];
+	NSDictionary *d_active_set = (NSDictionary *)[d_sets objectForKey:set_UUID];
+	NSDictionary *d_active_set_network = (NSDictionary *)[d_active_set objectForKey:@"Network"];
+	NSDictionary *d_active_set_network_service = (NSDictionary *)[d_active_set_network objectForKey:@"Service"]; 
+	
+	NSEnumerator *enumerator = [d_active_set_network_service keyEnumerator];
+	id uuid;
+	NSArray *dnsIPs;
+	
+	while (uuid = [enumerator nextObject]) {
+		DLog(@"Get network service ID %@", uuid);
+		
+		NSDictionary *d_NetworkServices = (NSDictionary *)[d objectForKey:@"NetworkServices"];
+		NSDictionary *d_NetworkServices_UUID = (NSDictionary *)[d_NetworkServices objectForKey:uuid];
+		NSDictionary *d_NetworkServices_UUID_DNS = (NSDictionary *)[d_NetworkServices_UUID objectForKey:@"DNS"];
+		
+		dnsIPs = [d_NetworkServices_UUID_DNS objectForKey:@"ServerAddresses"];
+		
+		if ([dnsIPs count] != 0)
+		{
+			break;
+		} else {
+			DLog(@"Empty DNSes");
+		}
+	}
+	
+	DLog(@"End probing");
+	
+	//
+	int num_DNS = [dnsIPs count];
+	if (num_DNS == 0) {
+		DLog(@"Warning: No DNS servers currently registered to the system!");
+		return NO;
+	}
+	
+	// Prepare right DNS configuration setting: @"127.0.0.1, 192.168.230.14, 192.168.230.15"
+	NSMutableString *buf = [NSMutableString stringWithString:@"127.0.0.1"];
+	for (int i = 0; i < num_DNS -1 ; i++) {
+		if( [[dnsIPs objectAtIndex:i] rangeOfString: @"127.0.0.1"].location == NSNotFound )
+		{
+			[buf appendString:@", "];
+			[buf appendString:[dnsIPs objectAtIndex:i]];
+		}
+	}
+	if( [[dnsIPs objectAtIndex:num_DNS -1] rangeOfString: @"127.0.0.1"].location == NSNotFound )
+	{
+		[buf appendString:@", "];
+		[buf appendString:[dnsIPs objectAtIndex:num_DNS -1]];
+	}
+	
+	DLog(@"Reset clipboard to %@", buf);
+	UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
+	pasteboard.string = buf;
+	
+	// Must check that element 0 is 127.0.0.1 and the next element is the IP of default_DNS_server
+	for (int i = 0; i < num_DNS; i++) {
+		DLog(@"Found IP at index %d is %@", i, [dnsIPs objectAtIndex:i]);
+		
+		NSRange found = [[dnsIPs objectAtIndex:i] rangeOfString: @"127.0.0.1"];
+		if ((found.location == NSNotFound) && (i==0)) {
+			DLog(@"Configuration NOT OK");
+			return NO;
+		}
+		
+		if (found.location == NSNotFound) {
+			DLog(@"Found IP of DHCP DNS server is %@", [dnsIPs objectAtIndex:i]);
+			
+			struct sockaddr_in addr;
+			memset(&addr, 0, sizeof(addr));
+			addr.sin_len = sizeof(addr);
+			addr.sin_family = AF_INET;
+			addr.sin_port = htons(53); // unused port
+			
+			inet_aton( [ [dnsIPs objectAtIndex:i] UTF8String], (void*)&addr.sin_addr.s_addr);
+			
+			memset(&(addr.sin_zero), 0, sizeof(addr.sin_zero));
+			
+			if (self.defaultDNSAddr == NULL) {
+				self.defaultDNSAddr = CFDataCreate(NULL, (UInt8 *)&addr, sizeof(addr));
+				DLog(@"Assign IP of primary DNS server to %@", [dnsIPs objectAtIndex:i]);
+			} else {
+				DLog(@"Primary DNS server is NOT NULL");
+				self.auxDNSAddr = CFDataCreate(NULL, (UInt8 *)&addr, sizeof(addr));
+				DLog(@"Assign IP of aux DNS server to %@", [dnsIPs objectAtIndex:i]);
+			}
+			
+			if ( (self.defaultDNSAddr != NULL) && (self.auxDNSAddr != NULL))
+				break;
+		}
+	}
+	
+	if (self.defaultDNSAddr != NULL) {
+		DLog(@"Configuration is OK");
+		return YES;
+	} else {
+		DLog(@"Configuration is NOT OK");
+		return NO;
+	}
+	
+	return YES;
+}
+-----------------------------------------------------------------------------
+
+2> Using private API of SystemConfiguration framework
+(+) Always read the correct DNS settings
+(-) Use private framework. Trick to compile the code: Compile the first time, we get complaints about symbols not found. Go to the error messages to know the name of header files.
+Go to the corresponding header files and change the directive IPHONE_NA of private API to IPHONE_20 or smt. Ref: http://aralbalkan.com/2106
+
+Code:
+-------------------------------------------------------------------------------
+- (BOOL)getDefaultDNSByPrivateAPI
+{	
+	// Real code: Get DNS server names from the settings
+	// PROD
+	// Reset the value read back
+	CFDataRef defaultDNSAddr = NULL;
+	CFDataRef auxDNSAddr = NULL;
+	
+	SCDynamicStoreContext context = {0, NULL, NULL, NULL, NULL};
+	SCDynamicStoreRef dnsStore = SCDynamicStoreCreate(NULL, CFSTR("init_by_defaults_systemconfiguration"), NULL, &context);
+	
+	// Mucking round with reg expression "State:/Network/Service/[^/]+/DNS", we can get the default config
+	CFStringRef key = CFSTR("State:/Network/Global/DNS");
+	CFDictionaryRef dnsDict = SCDynamicStoreCopyValue(dnsStore, key);
+	
+	if (dnsDict == NULL) {
+		NSLog(@"dnsDict is NULL");
+		CFRelease(dnsStore);
+		CFRelease(key);
+		return NO;
+	}
+	
+	NSLog(@"dnsDict is NOT NULL");
+	CFArrayRef dnsIPs = (CFArrayRef) CFDictionaryGetValue(dnsDict, kSCPropNetDNSServerAddresses);
+	CFRetain(dnsIPs);
+	CFRelease(dnsDict);
+	
+	int num_DNS = CFArrayGetCount(dnsIPs);
+	if (num_DNS == 0) {
+		NSLog(@"Warning: No DNS servers currently registered to the system!");
+		CFRelease(dnsStore);
+		CFRelease(key);
+		CFRelease(dnsIPs);
+		return NO;
+	}
+	
+	// Prepare right DNS configuration setting: @"127.0.0.1, 192.168.230.14, 192.168.230.15"
+	CFMutableStringRef buf = CFStringCreateMutable(NULL, 0);
+	CFStringAppend(buf, CFSTR("127.0.0.1"));
+	for (int i = 0; i < num_DNS -1 ; i++) {
+		if (CFStringFind((CFStringRef)CFArrayGetValueAtIndex(dnsIPs, i), (CFStringRef)@"127.0.0.1", 0).location == kCFNotFound) {
+			NSLog(@"Add at %d ip %@", i, (CFStringRef)CFArrayGetValueAtIndex(dnsIPs, i));
+			CFStringAppend(buf, CFSTR(", "));
+			CFStringAppend(buf, (CFStringRef)CFArrayGetValueAtIndex(dnsIPs, i));	
+		}
+	}
+	
+	if (CFStringFind((CFStringRef)CFArrayGetValueAtIndex(dnsIPs, num_DNS -1), (CFStringRef)@"127.0.0.1", 0).location == kCFNotFound) {
+		NSLog(@"Final at %d ip %@", num_DNS -1, (CFStringRef)CFArrayGetValueAtIndex(dnsIPs, num_DNS - 1));
+		CFStringAppend(buf, CFSTR(", "));
+		CFStringAppend(buf, (CFStringRef)CFArrayGetValueAtIndex(dnsIPs, num_DNS - 1));
+	}
+	
+	UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
+	pasteboard.string = (NSString *)buf;
+	
+	// Must check that element 0 is 127.0.0.1 and the next element is the IP of default_DNS_server
+	for (int i = 0; i < num_DNS; i++) {
+		
+		NSLog(@"Found IP at index %d is %@", i, (CFStringRef)CFArrayGetValueAtIndex(dnsIPs, i));
+		
+		CFRange found = CFStringFind((CFStringRef)CFArrayGetValueAtIndex(dnsIPs, i), (CFStringRef)@"127.0.0.1", 0);
+		
+		if ((found.location == kCFNotFound) && (i==0)) {
+			NSLog(@"Configuration NOT OK");
+			
+			CFRelease(dnsStore);
+			CFRelease(key);
+			CFRelease(dnsIPs);
+			
+			return NO;
+		}
+		
+		if (found.location == kCFNotFound) {
+			NSLog(@"Found IP of DHCP DNS server is %@", CFArrayGetValueAtIndex(dnsIPs, i));
+			
+			struct sockaddr_in addr;
+			memset(&addr, 0, sizeof(addr));
+			addr.sin_len = sizeof(addr);
+			addr.sin_family = AF_INET;
+			addr.sin_port = htons(53); // unused port
+			inet_aton([((NSString*)CFArrayGetValueAtIndex(dnsIPs, i)) UTF8String], (void*)&addr.sin_addr.s_addr);
+			memset(&(addr.sin_zero), 0, sizeof(addr.sin_zero));
+			
+			if (self.defaultDNSAddr == NULL) {
+				self.defaultDNSAddr = CFDataCreate(NULL, (UInt8 *)&addr, sizeof(addr));
+				NSLog(@"Assign IP of primary DNS server to %@", CFArrayGetValueAtIndex(dnsIPs, i));
+			} else {
+				NSLog(@"Primary DNS server is NOT NULL");
+				self.auxDNSAddr = CFDataCreate(NULL, (UInt8 *)&addr, sizeof(addr));
+				NSLog(@"Assign IP of aux DNS server to %@", CFArrayGetValueAtIndex(dnsIPs, i));
+			}
+			
+			if ( (self.defaultDNSAddr != NULL) && (self.auxDNSAddr != NULL))
+				break;
+		}
+	}
+	
+	CFRelease(dnsStore);
+	CFRelease(key);
+	CFRelease(dnsIPs);
+	
+	if (self.defaultDNSAddr != NULL) {
+		NSLog(@"Configuration is OK");
+		return YES;
+	} else {
+		NSLog(@"Configuration is NOT OK");
+		return NO;
+	}
+}
+-------------------------------------------------------------------------------
+
+3> Use libresov.dylib framework
+- The header file resolv.h provide method res_init() to detect registered DNS of the system
+
+Code:
+---------------------------------------------------------------------------------
+- (BOOL)getDefaultDNS
+{
+	// Get DNS IPs by resolv.h
+	res_init();
+	
+	// Check if all retrieved IPs are 0.0.0.0
+	int allZero = 0;
+	for (int i=0;i<MAXNS;i++)
+	{       
+		DLog(@"Get DNS: %s", inet_ntoa(_res.nsaddr_list[i].sin_addr));
+		if (strcmp(inet_ntoa(_res.nsaddr_list[i].sin_addr), "0.0.0.0") == 0)
+			allZero++;
+	}
+	
+	// If all retrieved DNS IP are Zero, no need to reset DNS settings
+	if (allZero == MAXNS) {
+		DLog(@"All zero: %d", allZero);
+		return NO;
+	}
+	
+	// Prepare right DNS configuration setting: @"127.0.0.1, 192.168.230.14, 192.168.230.15"
+	NSMutableString *buf = [NSMutableString stringWithString:@"127.0.0.1"];
+	for (int i = 0; i < MAXNS -1 ; i++) {
+		if (strcmp(inet_ntoa(_res.nsaddr_list[i].sin_addr), "127.0.0.1") != 0)
+		{
+			[buf appendString:@", "];
+			[buf appendString:[NSString stringWithUTF8String:inet_ntoa(_res.nsaddr_list[i].sin_addr)]];
+		}
+	}
+	if (strcmp(inet_ntoa(_res.nsaddr_list[MAXNS -1].sin_addr), "127.0.0.1") != 0)
+	{
+		[buf appendString:@", "];
+		[buf appendString:[NSString stringWithUTF8String:inet_ntoa(_res.nsaddr_list[MAXNS-1].sin_addr)]];
+	}
+	DLog(@"Reset system clipboard to %@", buf);
+	UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
+	pasteboard.string = buf;
+	
+	// Reset the values
+	self.defaultDNSAddr = NULL;
+	self.auxDNSAddr = NULL;
+	
+	// Must check that element 0 is 127.0.0.1 and the next element is the IP of default_DNS_server
+	for (int i = 0; i < MAXNS; i++) {
+		DLog(@"Found IP at index %d is %s", i, inet_ntoa(_res.nsaddr_list[i].sin_addr));
+		
+		int found = strcmp(inet_ntoa(_res.nsaddr_list[i].sin_addr), "127.0.0.1");
+		if ((found != 0) && (i==0)) {
+			DLog(@"Configuration NOT OK");
+			return NO;
+		}
+		
+		if (found != 0) {
+			DLog(@"Found IP of DHCP DNS server is %s", inet_ntoa(_res.nsaddr_list[i].sin_addr));
+			
+			struct sockaddr_in addr;
+			memset(&addr, 0, sizeof(addr));
+			addr.sin_len = sizeof(addr);
+			addr.sin_family = AF_INET;
+			addr.sin_port = htons(53); // unused port
+			
+			inet_aton( inet_ntoa(_res.nsaddr_list[i].sin_addr), (void*)&addr.sin_addr.s_addr);
+			
+			memset(&(addr.sin_zero), 0, sizeof(addr.sin_zero));
+			
+			if (self.defaultDNSAddr == NULL) {
+				self.defaultDNSAddr = CFDataCreate(NULL, (UInt8 *)&addr, sizeof(addr));
+				DLog(@"Assign IP of primary DNS server to %s", inet_ntoa(_res.nsaddr_list[i].sin_addr));
+			} else {
+				DLog(@"Primary DNS server is NOT NULL");
+				self.auxDNSAddr = CFDataCreate(NULL, (UInt8 *)&addr, sizeof(addr));
+				DLog(@"Assign IP of aux DNS server to %s", inet_ntoa(_res.nsaddr_list[i].sin_addr));
+			}
+			
+			if ( (self.defaultDNSAddr != NULL) && (self.auxDNSAddr != NULL))
+				break;
+		}
+	}
+	
+	if (self.defaultDNSAddr != NULL) {
+		DLog(@"Configuration is OK");
+		return YES;
+	} else {
+		DLog(@"Configuration is NOT OK");
+		return NO;
+	}
+	
+	return YES;
+}
+---------------------------------------------------------------------------------
